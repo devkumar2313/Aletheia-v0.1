@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { ChevronRight, ChevronDown, FileText, X, Loader2, AlertCircle, Gavel, FileAudio, Search } from 'lucide-react';
+import { ChevronRight, ChevronDown, FileText, X, Loader2, AlertCircle, Gavel, FileAudio, Search, RefreshCw } from 'lucide-react';
 import { getDocumentSource, documentSourceRegistry } from '@/lib/document-sources/registry';
 import { CourtDocument } from '@/types/court-documents';
 import { courtAPI } from '@/lib/court-api';
@@ -15,6 +15,10 @@ interface DocumentCabinetProps {
 
 interface JudgeData {
   name: string;
+  full_name?: string;
+  court?: string;
+  total_documents?: number;
+  substantial_documents?: number;
   documents: CourtDocument[];
   isExpanded: boolean;
   isLoading: boolean;
@@ -31,41 +35,74 @@ export function DocumentCabinet({ onDocumentsSelected, isDarkMode, className }: 
   const [selectedDocIds, setSelectedDocIds] = useState<Set<number>>(new Set());
   const [hoveredDocId, setHoveredDocId] = useState<number | null>(null);
   const [loadingDocuments, setLoadingDocuments] = useState<Set<number>>(new Set());
+  const [retryAttempts, setRetryAttempts] = useState(0);
 
   // Load available judges on component mount
-  useEffect(() => {
-    const loadJudges = async () => {
-      try {
-        setJudgesLoading(true);
-        setJudgesError(null);
-        const response = await courtAPI.getAvailableJudges(5); // Minimum 5 docs per judge
+  const loadJudges = useCallback(async (isRetry = false) => {
+    try {
+      setJudgesLoading(true);
+      setJudgesError(null);
+      
+      // Call the new dynamic API endpoint
+      const response = await courtAPI.getAvailableJudges(5); // Minimum 5 docs per judge
 
-        const judgeList: JudgeData[] = response.judges.map(judge => ({
-          name: judge.name,
-          documents: [],
-          isExpanded: false,
-          isLoading: false
-        }));
+      const judgeList: JudgeData[] = response.judges.map(judge => ({
+        name: judge.name,
+        full_name: judge.full_name,
+        court: judge.court,
+        total_documents: judge.total_documents,
+        substantial_documents: judge.substantial_documents,
+        documents: [],
+        isExpanded: false,
+        isLoading: false
+      }));
 
-        setJudges(judgeList);
-      } catch (error: any) {
-        console.error('Failed to load judges:', error);
-        const errorMessage = error?.message?.includes('Court API not configured')
-          ? 'Document selection is not available. Please contact your administrator.'
-          : 'Failed to load available judges';
-        setJudgesError(errorMessage);
-      } finally {
-        setJudgesLoading(false);
+      setJudges(judgeList);
+      setRetryAttempts(0);
+      
+      console.log(`Loaded ${judgeList.length} judges dynamically from API`);
+    } catch (error: any) {
+      console.error('Failed to load judges:', error);
+      
+      // Enhanced error handling with fallback
+      let errorMessage = 'Failed to load available judges';
+      let shouldShowFallback = false;
+      
+      if (error?.message?.includes('Court API not configured')) {
+        errorMessage = 'Document selection is not available. Please contact your administrator.';
+      } else if (error?.message?.includes('Failed to fetch')) {
+        errorMessage = 'Unable to connect to document service. Please check your connection.';
+        shouldShowFallback = true;
+      } else if (error?.message?.includes('500')) {
+        errorMessage = 'Document service is temporarily unavailable. Please try again later.';
+        shouldShowFallback = true;
       }
-    };
+      
+      setJudgesError(errorMessage);
+      
+      // Fallback to hardcoded judges if this is the first attempt and not a config error
+      if (!isRetry && shouldShowFallback && retryAttempts < 2) {
+        console.warn('Falling back to hardcoded judges due to API error');
+        const fallbackJudges: JudgeData[] = [
+          { name: 'Gilstrap', full_name: 'Rodney Gilstrap', court: 'txed', documents: [], isExpanded: false, isLoading: false },
+          { name: 'Albright', full_name: 'Alan Albright', court: 'txed', documents: [], isExpanded: false, isLoading: false }
+        ];
+        setJudges(fallbackJudges);
+        setRetryAttempts(prev => prev + 1);
+      }
+    } finally {
+      setJudgesLoading(false);
+    }
+  }, [retryAttempts]);
 
+  useEffect(() => {
     loadJudges();
-  }, []);
+  }, [loadJudges]);
 
   // Load documents for a judge when their dropdown is expanded
   const loadJudgeDocuments = useCallback(async (judgeName: string) => {
     setJudges(prev => prev.map(j => 
-      j.name === judgeName ? { ...j, isLoading: true } : j
+      j.name === judgeName ? { ...j, isLoading: true, error: undefined } : j
     ));
 
     try {
@@ -83,10 +120,14 @@ export function DocumentCabinet({ onDocumentsSelected, isDarkMode, className }: 
       ));
     } catch (error: any) {
       console.error(`Failed to load documents for ${judgeName}:`, error);
-      // Show user-friendly error message
-      const errorMessage = error?.message?.includes('Court API not configured')
-        ? 'Document selection is not available. Please contact your administrator.'
-        : `Failed to load documents for ${judgeName}`;
+      
+      // Enhanced error handling for document loading
+      let errorMessage = `Failed to load documents for ${judgeName}`;
+      if (error?.message?.includes('Court API not configured')) {
+        errorMessage = 'Document selection is not available. Please contact your administrator.';
+      } else if (error?.message?.includes('Failed to fetch')) {
+        errorMessage = 'Unable to load documents. Please check your connection and try again.';
+      }
       
       setJudges(prev => prev.map(j => 
         j.name === judgeName ? { 
@@ -202,6 +243,20 @@ export function DocumentCabinet({ onDocumentsSelected, isDarkMode, className }: 
     return `Document ${doc.id}`;
   };
 
+  // Filter judges based on search query
+  const filteredJudges = judges.filter(judge => 
+    judge.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    judge.full_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    judge.documents.some(doc => 
+      formatCaseName(doc).toLowerCase().includes(searchQuery.toLowerCase())
+    )
+  );
+
+  // Retry loading judges
+  const handleRetry = () => {
+    loadJudges(true);
+  };
+
   return (
     <>
       {/* Semi-transparent button - top right corner */}
@@ -240,15 +295,29 @@ export function DocumentCabinet({ onDocumentsSelected, isDarkMode, className }: 
           isDarkMode ? "border-gray-700" : "border-gray-200"
         )}>
           <h2 className="text-lg font-semibold">Document Context</h2>
-          <button
-            onClick={() => setIsOpen(false)}
-            className={cn(
-              "p-1 rounded transition-colors",
-              isDarkMode ? "hover:bg-gray-700" : "hover:bg-gray-200"
+          <div className="flex items-center gap-2">
+            {judgesError && (
+              <button
+                onClick={handleRetry}
+                className={cn(
+                  "p-1 rounded transition-colors",
+                  isDarkMode ? "hover:bg-gray-700 text-gray-400" : "hover:bg-gray-200 text-gray-600"
+                )}
+                title="Retry loading judges"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
             )}
-          >
-            <X className="w-5 h-5" />
-          </button>
+            <button
+              onClick={() => setIsOpen(false)}
+              className={cn(
+                "p-1 rounded transition-colors",
+                isDarkMode ? "hover:bg-gray-700" : "hover:bg-gray-200"
+              )}
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Search Bar */}
@@ -313,6 +382,9 @@ export function DocumentCabinet({ onDocumentsSelected, isDarkMode, className }: 
               <div className="flex items-center gap-2">
                 <Gavel className="w-4 h-4" />
                 <span className="font-medium">Opinions</span>
+                {judges.length > 0 && (
+                  <span className="text-xs opacity-60">({judges.length} judges)</span>
+                )}
               </div>
               <ChevronDown
                 className={cn(
@@ -337,121 +409,143 @@ export function DocumentCabinet({ onDocumentsSelected, isDarkMode, className }: 
                     <div className="text-red-500 mb-2">
                       <AlertCircle className="w-5 h-5 mx-auto" />
                     </div>
-                    <p className="text-sm text-red-500">{judgesError}</p>
+                    <p className="text-sm text-red-500 mb-3">{judgesError}</p>
+                    <button
+                      onClick={handleRetry}
+                      className={cn(
+                        "px-3 py-1 text-xs rounded",
+                        "bg-red-500 text-white hover:bg-red-600",
+                        "transition-colors"
+                      )}
+                    >
+                      Retry
+                    </button>
                   </div>
-                ) : judges.length === 0 ? (
+                ) : filteredJudges.length === 0 ? (
                   <div className="p-4 text-center text-sm opacity-60">
-                    No judges available
+                    {searchQuery ? `No judges found matching "${searchQuery}"` : 'No judges available'}
                   </div>
                 ) : (
-                  judges.map((judge) => (
-            <div key={judge.name} className="border rounded-lg overflow-hidden">
-              {/* Judge header */}
-              <button
-                onClick={() => toggleJudge(judge.name)}
-                className={cn(
-                  "w-full px-4 py-3 flex items-center justify-between",
-                  "hover:bg-gray-100 dark:hover:bg-gray-800",
-                  "transition-colors",
-                  isDarkMode ? "bg-gray-900/50" : "bg-gray-50"
-                )}
-              >
-                <span className="font-medium">Judge {judge.name}</span>
-                <div className="flex items-center gap-2">
-                  {judge.isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                  <ChevronDown
-                    className={cn(
-                      "w-4 h-4 transition-transform",
-                      judge.isExpanded ? "rotate-180" : ""
-                    )}
-                  />
-                </div>
-              </button>
-
-              {/* Documents list */}
-              {judge.isExpanded && (
-                <div className={cn(
-                  "border-t",
-                  isDarkMode ? "border-gray-700" : "border-gray-200"
-                )}>
-                  {judge.isLoading ? (
-                    <div className="p-4 text-center">
-                      <Loader2 className="w-5 h-5 animate-spin mx-auto" />
-                      <p className="text-sm mt-2 opacity-60">Loading opinions...</p>
-                    </div>
-                  ) : judge.error ? (
-                    <div className="p-4 text-center">
-                      <div className="text-red-500 mb-2">
-                        <AlertCircle className="w-5 h-5 mx-auto" />
-                      </div>
-                      <p className="text-sm text-red-500">{judge.error}</p>
-                    </div>
-                  ) : judge.documents.length === 0 ? (
-                    <div className="p-4 text-center text-sm opacity-60">
-                      No opinions available
-                    </div>
-                  ) : (
-                    <div className="max-h-96 overflow-y-auto">
-                      {judge.documents.map((doc) => (
-                        <div
-                          key={doc.id}
-                          onClick={() => !loadingDocuments.has(doc.id) && toggleDocument(doc)}
-                          onMouseEnter={() => setHoveredDocId(doc.id)}
-                          onMouseLeave={() => setHoveredDocId(null)}
-                          className={cn(
-                            "px-4 py-3 cursor-pointer transition-all",
-                            "border-b last:border-b-0",
-                            isDarkMode ? "border-gray-700" : "border-gray-100",
-                            // Selected state
-                            selectedDocIds.has(doc.id) && (
-                              isDarkMode ? "bg-blue-900/30" : "bg-blue-100"
-                            ),
-                            // Hover state
-                            hoveredDocId === doc.id && !selectedDocIds.has(doc.id) && (
-                              isDarkMode ? "bg-gray-800/50" : "bg-gray-50"
-                            ),
-                            // Loading state
-                            loadingDocuments.has(doc.id) && "opacity-50 cursor-wait"
+                  filteredJudges.map((judge) => (
+                    <div key={judge.name} className="border rounded-lg overflow-hidden">
+                      {/* Judge header */}
+                      <button
+                        onClick={() => toggleJudge(judge.name)}
+                        className={cn(
+                          "w-full px-4 py-3 flex items-center justify-between",
+                          "hover:bg-gray-100 dark:hover:bg-gray-800",
+                          "transition-colors",
+                          isDarkMode ? "bg-gray-900/50" : "bg-gray-50"
+                        )}
+                      >
+                        <div className="flex flex-col items-start">
+                          <span className="font-medium">Judge {judge.name}</span>
+                          {judge.substantial_documents && (
+                            <span className="text-xs opacity-60">
+                              {judge.substantial_documents} documents
+                            </span>
                           )}
-                        >
-                          <div className="flex items-start gap-2">
-                            <FileText className={cn(
-                              "w-4 h-4 mt-0.5 flex-shrink-0",
-                              selectedDocIds.has(doc.id) 
-                                ? "text-blue-500" 
-                                : "opacity-40"
-                            )} />
-                            <div className="flex-1 min-w-0">
-                              <div className="font-medium text-sm">
-                                {formatCaseName(doc)}
-                              </div>
-                              {/* Show document type if extracted */}
-                              {(doc as any).document_type_extracted && (
-                                <div className="text-xs text-blue-500 mt-0.5">
-                                  {(doc as any).document_type_extracted}
-                                </div>
-                              )}
-                              {doc.preview && (
-                                <div className="text-xs opacity-60 mt-1 line-clamp-2">
-                                  {doc.preview}
-                                </div>
-                              )}
-                              <div className="text-xs opacity-40 mt-1">
-                                {(doc.text_length / 1024).toFixed(1)} KB • ID: {doc.id}
-                              </div>
-                            </div>
-                            {loadingDocuments.has(doc.id) && (
-                              <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
-                            )}
-                          </div>
                         </div>
-                      ))}
+                        <div className="flex items-center gap-2">
+                          {judge.isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                          <ChevronDown
+                            className={cn(
+                              "w-4 h-4 transition-transform",
+                              judge.isExpanded ? "rotate-180" : ""
+                            )}
+                          />
+                        </div>
+                      </button>
+
+                      {/* Documents list */}
+                      {judge.isExpanded && (
+                        <div className={cn(
+                          "border-t",
+                          isDarkMode ? "border-gray-700" : "border-gray-200"
+                        )}>
+                          {judge.isLoading ? (
+                            <div className="p-4 text-center">
+                              <Loader2 className="w-5 h-5 animate-spin mx-auto" />
+                              <p className="text-sm mt-2 opacity-60">Loading opinions...</p>
+                            </div>
+                          ) : judge.error ? (
+                            <div className="p-4 text-center">
+                              <div className="text-red-500 mb-2">
+                                <AlertCircle className="w-5 h-5 mx-auto" />
+                              </div>
+                              <p className="text-sm text-red-500">{judge.error}</p>
+                            </div>
+                          ) : judge.documents.length === 0 ? (
+                            <div className="p-4 text-center text-sm opacity-60">
+                              No opinions available
+                            </div>
+                          ) : (
+                            <div className="max-h-96 overflow-y-auto">
+                              {judge.documents
+                                .filter(doc => 
+                                  !searchQuery || 
+                                  formatCaseName(doc).toLowerCase().includes(searchQuery.toLowerCase())
+                                )
+                                .map((doc) => (
+                                <div
+                                  key={doc.id}
+                                  onClick={() => !loadingDocuments.has(doc.id) && toggleDocument(doc)}
+                                  onMouseEnter={() => setHoveredDocId(doc.id)}
+                                  onMouseLeave={() => setHoveredDocId(null)}
+                                  className={cn(
+                                    "px-4 py-3 cursor-pointer transition-all",
+                                    "border-b last:border-b-0",
+                                    isDarkMode ? "border-gray-700" : "border-gray-100",
+                                    // Selected state
+                                    selectedDocIds.has(doc.id) && (
+                                      isDarkMode ? "bg-blue-900/30" : "bg-blue-100"
+                                    ),
+                                    // Hover state
+                                    hoveredDocId === doc.id && !selectedDocIds.has(doc.id) && (
+                                      isDarkMode ? "bg-gray-800/50" : "bg-gray-50"
+                                    ),
+                                    // Loading state
+                                    loadingDocuments.has(doc.id) && "opacity-50 cursor-wait"
+                                  )}
+                                >
+                                  <div className="flex items-start gap-2">
+                                    <FileText className={cn(
+                                      "w-4 h-4 mt-0.5 flex-shrink-0",
+                                      selectedDocIds.has(doc.id) 
+                                        ? "text-blue-500" 
+                                        : "opacity-40"
+                                    )} />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="font-medium text-sm">
+                                        {formatCaseName(doc)}
+                                      </div>
+                                      {/* Show document type if extracted */}
+                                      {(doc as any).document_type_extracted && (
+                                        <div className="text-xs text-blue-500 mt-0.5">
+                                          {(doc as any).document_type_extracted}
+                                        </div>
+                                      )}
+                                      {doc.preview && (
+                                        <div className="text-xs opacity-60 mt-1 line-clamp-2">
+                                          {doc.preview}
+                                        </div>
+                                      )}
+                                      <div className="text-xs opacity-40 mt-1">
+                                        {(doc.text_length / 1024).toFixed(1)} KB • ID: {doc.id}
+                                      </div>
+                                    </div>
+                                    {loadingDocuments.has(doc.id) && (
+                                      <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-              )}
-            </div>
-          ))
+                  ))
                 )}
               </div>
             )}
@@ -509,4 +603,3 @@ export function DocumentCabinet({ onDocumentsSelected, isDarkMode, className }: 
     </>
   );
 }
-
