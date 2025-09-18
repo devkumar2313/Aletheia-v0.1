@@ -39,11 +39,13 @@ class CourtAPIClient {
     min_length?: number;
     limit?: number;
     offset?: number;
+    category?: string; // Add category support for judge mapping
   }): Promise<SearchResponse> {
     const searchParams = new URLSearchParams();
     
     // Map parameters to Court Processor API format
     if (params.judge) searchParams.append('judge', params.judge);
+    if (params.category) searchParams.append('judge', params.category); // Map category to judge
     if (params.type) searchParams.append('type', params.type);
     if (params.min_length) searchParams.append('min_length', params.min_length.toString());
     searchParams.append('limit', (params.limit || 50).toString());
@@ -96,8 +98,14 @@ class CourtAPIClient {
       court: string;
       total_documents: number;
       substantial_documents: number;
+      first_document?: string;
+      latest_document?: string;
     }>;
     total_judges: number;
+    filters?: {
+      min_documents: number;
+      min_content_length: number;
+    };
   }> {
     const response = await fetch(`${this.getUrl()}/api/judges?min_docs=${minDocs}`);
     if (!response.ok) {
@@ -113,8 +121,13 @@ class CourtAPIClient {
       total_documents: number;
       substantial_documents: number;
       judge_count: number;
+      first_document?: string;
+      latest_document?: string;
     }>;
     total_courts: number;
+    filters?: {
+      min_documents: number;
+    };
   }> {
     const response = await fetch(`${this.getUrl()}/api/courts?min_docs=${minDocs}`);
     if (!response.ok) {
@@ -126,8 +139,11 @@ class CourtAPIClient {
   async getDataSummary(): Promise<{
     total_documents: number;
     substantial_documents: number;
+    very_long_documents: number;
     unique_judges: number;
     unique_courts: number;
+    total_characters: number;
+    avg_document_length: number;
     top_judges: Array<{ name: string; documents: number }>;
     top_courts: Array<{ court_id: string; documents: number }>;
     data_quality: {
